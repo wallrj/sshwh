@@ -38,7 +38,7 @@ type Server struct {
 func (s *Server) bannerCallback(conn ssh.ConnMetadata) string {
 	sessionID := base64.StdEncoding.EncodeToString(conn.SessionID())
 	log.Println("SESSIONID", sessionID)
-	return fmt.Sprintf("cat FILE > ssh localhost %s\n", sessionID)
+	return fmt.Sprintf("SESSIONID: %s\n", sessionID)
 }
 
 func New(c *Config) (*Server, error) {
