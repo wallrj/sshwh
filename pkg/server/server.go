@@ -1,6 +1,9 @@
 package server
 
 import (
+	"encoding/base64"
+	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net"
@@ -8,13 +11,18 @@ import (
 	"time"
 
 	"github.com/pkg/errors"
-
 	"golang.org/x/crypto/ssh"
 )
 
 type Config struct {
 	Address     string
 	HostKeyPath string
+}
+
+type Consumer struct {
+	sessionID   string
+	writeCloser io.WriteCloser
+	finished    chan struct{}
 }
 
 type Server struct {
@@ -24,18 +32,21 @@ type Server struct {
 	connections     sync.WaitGroup
 	quit            chan struct{}
 	exited          chan struct{}
+	consumers       map[string]*Consumer
 }
 
 func (s *Server) bannerCallback(conn ssh.ConnMetadata) string {
-	log.Println(conn)
-	return "Hello\n"
+	sessionID := base64.StdEncoding.EncodeToString(conn.SessionID())
+	log.Println("SESSIONID", sessionID)
+	return fmt.Sprintf("cat FILE > ssh localhost %s\n", sessionID)
 }
 
 func New(c *Config) (*Server, error) {
 	server := &Server{
-		config: c,
-		quit:   make(chan struct{}),
-		exited: make(chan struct{}),
+		config:    c,
+		quit:      make(chan struct{}),
+		exited:    make(chan struct{}),
+		consumers: map[string]*Consumer{},
 	}
 	sshConfig := &ssh.ServerConfig{
 		NoClientAuth:   true,
@@ -104,40 +115,75 @@ func (s *Server) Serve() error {
 	}
 }
 
+type exitStatusMsg struct {
+	Status uint32
+}
+
+// RFC 4254 Section 6.5.
+type execMsg struct {
+	Command string
+}
+
 func (s *Server) handleConnection(conn net.Conn) error {
-	// Before use, a handshake must be performed on the incoming
-	// net.Conn.
-	_, chans, reqs, err := ssh.NewServerConn(conn, s.sshServerConfig)
+	defer conn.Close()
+	serverConn, chans, reqs, err := ssh.NewServerConn(conn, s.sshServerConfig)
 	if err != nil {
 		return errors.Wrap(err, "failed to handshake")
 	}
+	defer serverConn.Close()
+
+	sessionID := base64.StdEncoding.EncodeToString(serverConn.SessionID())
+
 	go ssh.DiscardRequests(reqs)
 	for c := range chans {
+		log.Println("NewChannel.ChannelType", c.ChannelType())
+		log.Printf("NewChannel.ExtraData: %q\n", c.ExtraData())
 		chn, reqs, err := c.Accept()
 		if err != nil {
-			return errors.Wrap(err, "failed to accept")
+			log.Println(errors.Wrap(err, "failed to accept"))
+			continue
 		}
+
 		go func() {
+			defer chn.Close()
 			for req := range reqs {
+				log.Println("req", req.Type)
+				switch req.Type {
+				case "exec":
+					var msg execMsg
+					err := ssh.Unmarshal(req.Payload, &msg)
+					if err != nil {
+						log.Println(errors.Wrap(err, "failed to unmarshal"))
+					}
+					consumer, found := s.consumers[msg.Command]
+					if !found {
+						req.Reply(false, nil)
+						log.Printf("unexpected command: %q\n", msg.Command)
+						return
+					}
+					defer close(consumer.finished)
+					_, err = io.Copy(consumer.writeCloser, chn)
+					if err != nil {
+						log.Println(errors.Wrap(err, "failed to copy"))
+					}
+					return
+				case "shell":
+					consumer := &Consumer{
+						sessionID:   sessionID,
+						finished:    make(chan struct{}),
+						writeCloser: chn,
+					}
+					s.consumers[sessionID] = consumer
+					<-consumer.finished
+					return
+				default:
+				}
 				err := req.Reply(true, nil)
 				if err != nil {
-					log.Fatal(errors.Wrap(err, "failed to reply"))
+					log.Println(errors.Wrap(err, "failed to reply"))
 				}
 			}
 		}()
-		time.Sleep(time.Second)
-		_, err = chn.SendRequest("exit-status", false, []byte{0, 0, 0, 0})
-		if err != nil {
-			return errors.Wrap(err, "failed to send exit-status")
-		}
-		_, err = chn.Write([]byte("chn.Write"))
-		if err != nil {
-			return errors.Wrap(err, "failed to write")
-		}
-		err = chn.Close()
-		if err != nil {
-			return errors.Wrap(err, "failed to close")
-		}
 	}
 	return nil
 }

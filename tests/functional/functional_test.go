@@ -2,9 +2,9 @@ package functional_test
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
-	"github.com/wallrj/sshwh/pkg/client"
 	"github.com/wallrj/sshwh/pkg/server"
 )
 
@@ -21,10 +21,10 @@ func TestAll(t *testing.T) {
 		require.NoError(t, err)
 	}()
 	defer s.Close()
-
-	c := &client.Client{
-		Address: "localhost:2022",
-	}
-	err = c.Open()
-	require.NoError(t, err)
+	time.Sleep(time.Minute)
+	// c := &client.Client{
+	// 	Address: "localhost:2022",
+	// }
+	// err = c.Open()
+	// require.NoError(t, err)
 }
