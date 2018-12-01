@@ -1,7 +1,7 @@
 package client
 
 import (
-	"bytes"
+	"io"
 	"log"
 
 	"github.com/pkg/errors"
@@ -9,38 +9,58 @@ import (
 )
 
 type Client struct {
-	Address   string
+	config    *Config
+	sessionID string
 	sshClient *ssh.Client
 }
 
-func (c *Client) Open() error {
+type Config struct {
+	Address string
+}
+
+func New(c *Config) *Client {
+	return &Client{config: c}
+}
+
+func (c *Client) bannerCallback(message string) error {
+	log.Println("BANNER RECEIVED", message)
+	c.sessionID = message
+	return nil
+}
+
+func (c *Client) open() error {
 	config := &ssh.ClientConfig{
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		BannerCallback: func(message string) error {
-			log.Println("BANNER", message)
-			return nil
-		},
+		BannerCallback:  c.bannerCallback,
 	}
-	client, err := ssh.Dial("tcp", c.Address, config)
+	client, err := ssh.Dial("tcp", c.config.Address, config)
 	if err != nil {
 		return errors.Wrap(err, "failed to dial")
 	}
-	defer client.Close()
-	// Each ClientConn can support multiple interactive sessions,
-	// represented by a Session.
-	session, err := client.NewSession()
+	c.sshClient = client
+	return nil
+}
+
+func (c *Client) Send(content io.Reader) error {
+	err := c.open()
+	if err != nil {
+		return errors.Wrap(err, "failed to open")
+	}
+	defer c.sshClient.Close()
+
+	session, err := c.sshClient.NewSession()
 	if err != nil {
 		return errors.Wrap(err, "failed to create session")
 	}
 	defer session.Close()
 
-	// Once a Session is created, you can execute a single command on
-	// the remote side using the Run method.
-	var b bytes.Buffer
-	session.Stdout = &b
-	if err := session.Run("/usr/bin/whoami"); err != nil {
-		return errors.Wrap(err, "failed to run")
+	session.Stdin = content
+	if err := session.Run(c.sessionID); err != nil {
+		return errors.Wrap(err, "failed to send session ID")
 	}
-	log.Println("output", b.String())
+	return nil
+}
+
+func (c *Client) Receive(content io.Writer) error {
 	return nil
 }
